@@ -27,6 +27,7 @@ import numpy as np
 
 try:
     from scipy import sparse
+    from scipy.linalg import sqrtm
     from scipy.sparse import csc_matrix
     from scipy.sparse import linalg
 except(ImportError):
@@ -38,6 +39,12 @@ import re
 
 import multiprocess
 from concurrent.futures import ProcessPoolExecutor
+
+
+
+
+
+
 
 ## Module-level variables
 _DEBUG = False
@@ -169,8 +176,8 @@ class HMCSampler(Sampler):
         'symplectic_integrator_num_steps':20,
         # 'mass_matrix':1,
         'constraint_test':None,
-        'mass_matrix_gamma':np.ones(25),
-        'mass_matrix_theta':np.ones(25),
+        # 'mass_matrix':np.ones(13),
+        'mass_matrix':np.eye(13),
     }
 
     def __init__(self, configs=_DEF_CONFIGURATIONS):
@@ -302,7 +309,8 @@ class HMCSampler(Sampler):
                 else:
                     print("Failed to use efficient LU factorization for sparse matrices;")
                     print("Trying dense!")
-                    std = factorize_spsd_matrix(A.toarray(), shape=shape, lower=lower)
+                    std = sqrtm(A.toarray())
+                    # std = factorize_spsd_matrix(A.toarray(), shape=shape, lower=lower)
                     std = sparse.csc_matrix(std)
 
         else:
@@ -322,9 +330,9 @@ class HMCSampler(Sampler):
             `_MASS_MATRIX` and `_MASS_MATRIX_INV`, `_MASS_MATRIX_SQRT`  which should never be updated manually
         """
         size = self._CONFIGURATIONS['size']
-        # mass_matrix = self._CONFIGURATIONS['mass_matrix']
-        mass_matrix_gamma = self._CONFIGURATIONS['mass_matrix_gamma']
-        mass_matrix_theta = self._CONFIGURATIONS['mass_matrix_theta']
+        mass_matrix = self._CONFIGURATIONS['mass_matrix']
+        # mass_matrix_gamma = self._CONFIGURATIONS['mass_matrix_gamma']
+        # mass_matrix_theta = self._CONFIGURATIONS['mass_matrix_theta']
 
 #         if isinstance(mass_matrix, numbers.Number):
 # #             if mass_matrix <= 0:
@@ -343,10 +351,9 @@ class HMCSampler(Sampler):
             # mass_matrix_theta[18] *= 10
             # print("scales theta")
             # mass_matrix = sparse.diags(np.block([[first_block,second_block]]),[0])
-
-            print("mass matrix used in HMC:", np.block([[mass_matrix_theta,mass_matrix_gamma]]))
-            mass_matrix = sparse.diags(np.block([[mass_matrix_theta,mass_matrix_gamma]]),[0])
-
+            mass_matrix=mass_matrix
+            # mass_matrix = sparse.diags(mass_matrix*np.ones(size), shape=(size, size))
+            print("mass matrix used in HMC:", mass_matrix)
         else:
             mass_matrix = np.array([[mass_matrix]])
 
@@ -936,12 +943,12 @@ class HMCSampler(Sampler):
 
                 # Update state
                 proposed_state = current_state + (0.5*h) * self.mass_matrix_inv_matvec(current_momentum)
-                # print("1: proposed state", proposed_state)
+                print("1: proposed state", proposed_state)
 
                 # Update momentum
                 grad = self.potential_energy_grad(proposed_state)
                 proposed_momentum = current_momentum - h * grad
-                # print("<: proposed momentum", proposed_momentum)
+                print("<: proposed momentum", proposed_momentum)
 
                 # Update state again
                 proposed_state += (0.5*h) * self.mass_matrix_inv_matvec(proposed_momentum)
@@ -1021,6 +1028,8 @@ class HMCSampler(Sampler):
         hamiltonian_num_steps = self._CONFIGURATIONS['symplectic_integrator_num_steps']
         constraint_test       = self._CONFIGURATIONS['constraint_test']
 
+        print("here,here")
+
         liner, sliner = '=' * 53, '-' * 40
         if verbose:
             print("\n%s\nStarted Sampling\n%s\n" % (liner, liner))
@@ -1058,6 +1067,7 @@ class HMCSampler(Sampler):
         start_time = time.time()  # start timing
         for chain_ind in range(chain_length):
 
+            print("start markov chain")
             ## Proposal step :propose (momentum, state) pair
             # Generate a momentum proposal
             current_momentum = self.generate_white_noise(size=state_space_dimension)
@@ -1094,7 +1104,7 @@ class HMCSampler(Sampler):
 
             # print("proposed_momentum",proposed_momentum,"current_momentum",current_momentum)
             # print("proposed_state",proposed_state,"current_state",current_state)
-
+            constraint_test=None
             if constraint_test is not None:
                 if not constraint_test(proposed_state): constraint_violated = True
 
@@ -1111,8 +1121,8 @@ class HMCSampler(Sampler):
                 # print("proposed_momentum",proposed_momentum,"current_momentum",current_momentum)
                 # print("proposed_state",proposed_state,"current_state",current_state)
                 # print("current_momentum",np.max(proposed_momentum),"current_momentum",np.max(current_momentum))
-                # print("energy_loss",energy_loss,"proposal_energy",proposal_energy,"current_energy",current_energy,
-                #         "proposal_kinetic_energy",proposal_kinetic_energy,"proposal_potential_energy",proposal_potential_energy)
+                print("energy_loss",energy_loss,"proposal_energy",proposal_energy,"current_energy",current_energy,
+                         "proposal_kinetic_energy",proposal_kinetic_energy,"proposal_potential_energy",proposal_potential_energy)
                 # print("current_kinetic_energy",self.kinetic_energy(current_momentum),"current_potential_energy",self.potential_energy(current_state))
                 
                 _loss_thresh = 1000
@@ -1261,6 +1271,7 @@ class HMCSampler(Sampler):
 ## Simple interfaces (to generate instances from classes developed here).
 def create_hmc_sampler(size,
                        log_density,
+                       mass_matrix,
                        log_density_grad=None,
                        burn_in=100,
                        mix_in=10,
@@ -1270,10 +1281,7 @@ def create_hmc_sampler(size,
                     #    mass_matrix=(5000,1),
                        random_seed=1011,
                        constraint_test=None,
-                       mass_matrix_gamma=np.ones(25),
-                       mass_matrix_theta=np.ones(25),
-                       mass_matrix_gamma_scale=1.0,
-                       mass_matrix_theta_scale=1.0,
+                    #    mass_matrix
                        ):
     """
     Given the size of the target space, and a function to evalute log density,
@@ -1282,6 +1290,8 @@ def create_hmc_sampler(size,
 
     This function shows how to create :py:class:`HMCSampler` instances (with some or all configurations passed)
     """
+
+    print("here first")
 
     configs = dict(
         size=size,
@@ -1295,9 +1305,10 @@ def create_hmc_sampler(size,
         # mass_matrix=mass_matrix,
         random_seed=random_seed,
         constraint_test=constraint_test,
-        mass_matrix_gamma=mass_matrix_gamma*mass_matrix_gamma_scale,
-        mass_matrix_theta=mass_matrix_theta*mass_matrix_theta_scale,
+        mass_matrix=mass_matrix
     )
+
+    print("here second")
     return HMCSampler(configs)
 
 
