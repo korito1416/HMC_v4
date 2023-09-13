@@ -20,7 +20,9 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy.ma as ma
 from scipy.stats import truncnorm
-
+import sys
+import geopandas as gpd
+from scipy.linalg import sqrtm
 # MCMC (HMC) sampling routines
 
 mcmc_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "src/mcmc")
@@ -123,11 +125,54 @@ def get_gams_system_directory(filepath=_GAMS_SYSTEM_LOADER, ):
 
     return gams_sys_dir
 
+
+def theta_fitted (theta_coe,
+                 id_dataframe,
+                 theta_dataframe
+):
+
+    theta_dataframe['fitted_value'] = np.exp((theta_dataframe.iloc[:, :8] * theta_coe).sum(axis=1))
+    theta_dataframe_fin=theta_dataframe[['zbar_2017_muni','geometry','fitted_value']]
+    site_theta_2017 = gpd.overlay(id_dataframe, theta_dataframe_fin, how='intersection')
+
+
+    aux_price_2017=44.9736197781184
+    site_theta_2017 = site_theta_2017[site_theta_2017['zbar_2017_muni'].notna()]
+
+    # Define a function for computing weighted mean for each group
+    def weighted_mean(group):
+        d = group['fitted_value'] / aux_price_2017  # assuming aux.price.2017 is a constant
+        w = group['zbar_2017_muni']
+        return np.average(d, weights=w)
+
+    # 2. Group by 'id' and 3. compute the weighted mean for each group
+    result = site_theta_2017.groupby('id').apply(weighted_mean).reset_index(name='theta2017_25Sites')
+    theta=result['theta2017_25Sites'].to_numpy()
+    return theta
+
+
+
+def gamma_fitted (gamma_coe,
+                 id_dataframe,
+                 gamma_dataframe
+):
+
+    gamma_dataframe['fitted_value'] = np.exp((gamma_dataframe.iloc[:, :5] * gamma_coe).sum(axis=1))
+    gamma_dataframe_fin=gamma_dataframe[['geometry','fitted_value']]
+    site_gamma_2017 = gpd.overlay(id_dataframe, gamma_dataframe_fin, how='intersection')
+
+
+
+    # 2. Group by 'id' and 3. compute the weighted mean for each group
+    result = site_gamma_2017.groupby('id')['fitted_value'].mean().reset_index(name='gamma2017_25Sites')
+    gamma=result['gamma2017_25Sites'].to_numpy()
+    return gamma
+
 def log_density_function(uncertain_vals,
                          uncertain_vals_mean,
-                         theta_vals,
+                         block_matrix,
                          N,
-                         site_precisions,
+                        #  site_precisions,
                          alpha,
                          sol_val_X,
                          sol_val_Ua,
@@ -145,10 +190,13 @@ def log_density_function(uncertain_vals,
                          kappa,
                          pa,
                          pf,
+                         sfdata_theta,
+                         sfdata_gamma,
+                         sfdata_id,
                          two_param_uncertainty=True,
-                         thetaSD=None,
-                         gammaSD=None,
-                         scale=0.0,
+                        #  thetaSD=None,
+                        #  gammaSD=None,
+                         scale=0.0
                          ):
     """
     Define a function to evaluate log-density of the objective/posterior distribution
@@ -157,92 +205,61 @@ def log_density_function(uncertain_vals,
 
     Note that the log-density is the logarithm of the target density discarding any normalization factor
     """
-    if not two_param_uncertainty:
-        # One parameter (gamma) uncertainty
-        ds_vect    = np.asarray(ds_vect).flatten()
-        uncertain_vals  = np.asarray(uncertain_vals).flatten()
-        size = theta_vals.size
-        x0_vals    = uncertain_vals.T.dot(forestArea_2017_ha) / norm_fac
-        X_zero     = np.sum(x0_vals) * np.ones(leng)
+
+    # Two parameter uncertainty (both theta and gamma)
+    ds_vect        = np.asarray(ds_vect).flatten()
+    uncertain_vals  = np.asarray(uncertain_vals).flatten()
 
 
-        # shifted_X = zbar_2017 - sol.value(X)[0:size, :-1]
-        shifted_X  = sol_val_X[0: size, :-1].copy()
-        for j in range(N):
-            shifted_X[:, j]  = zbar_2017 - shifted_X[:, j]
-        omega      = np.dot(uncertain_vals, alpha * shifted_X - sol_val_Up)
+    theta_coe_vals=uncertain_vals[:8]
+    gamma_coe_vals=uncertain_vals[8:]
 
-        X_dym      = np.zeros(T+1)
-        X_dym[0]   = np.sum(x0_vals)
-        X_dym[1: ] = alpha_p_Adym * X_zero  + np.dot(Bdym, omega.T)
+    theta_fit=theta_fitted(theta_coe=theta_coe_vals,
+                id_dataframe=sfdata_id,
+                theta_dataframe=sfdata_theta)
+    gamma_fit=gamma_fitted(gamma_coe=gamma_coe_vals,
+            id_dataframe=sfdata_id,
+            gamma_dataframe=sfdata_gamma)
 
-        z_shifted_X = sol_val_X[0: size, :].copy()
-        scl = pa * theta_vals - pf * kappa
-        for j in range(N+1):
-            z_shifted_X [:, j] *= scl
+    size           = theta_fit.size
+    beta_vals = np.concatenate((theta_fit, gamma_fit))
 
-        term_1 = - np.sum(ds_vect[0: T] * sol_val_Ua) * zeta / 2
-        term_2 =   np.sum(ds_vect[0: T] * (X_dym[1: ] - X_dym[0: -1])) * pf
-        term_3 =   np.sum(ds_vect * np.sum(z_shifted_X, axis=0))
+    # if scale == 1.0:
+    #     uncertain_vals[:size] = uncertain_vals[:size]*thetaSD
+    #     uncertain_vals[size:] = uncertain_vals[size:]*gammaSD
+    # print("uncertain_vals used in log density:", uncertain_vals)
+    x0_vals        = beta_vals[size:].T.dot(forestArea_2017_ha) / norm_fac
+    X_zero         = np.sum(x0_vals) * np.ones(leng)
 
-        obj_val = term_1 + term_2 + term_3
+    # shifted_X = zbar_2017 - sol.value(X)[0:size, :-1]
+    shifted_X  = sol_val_X[0: size, :-1].copy()
+    for j in range(N):
+        shifted_X[:, j]  = zbar_2017 - shifted_X[:, j]
+    omega      = np.dot(beta_vals[size:], alpha * shifted_X - sol_val_Up)
 
-        uncertain_vals_dev   = uncertain_vals - uncertain_vals_mean
-        norm_log_prob   =   - 0.5 * np.dot(uncertain_vals_dev,
-                                           site_precisions.dot(uncertain_vals_dev)
-                                           )
-        log_density_val = -1.0  / xi * obj_val + norm_log_prob
+    X_dym      = np.zeros(T+1)
+    X_dym[0]   = np.sum(x0_vals)
+    X_dym[1: ] = alpha_p_Adym * X_zero  + np.dot(Bdym, omega.T)
 
-        log_density_val = float(log_density_val)
+    z_shifted_X = sol_val_X[0: size, :].copy()
+    scl = pa * beta_vals[:size] - pf * kappa
+    for j in range(N+1):
+        z_shifted_X [:, j] *= scl
 
-        if _DEBUG:
-            print("Term 1: ", term_1)
-            print("Term 2: ", term_2)
-            print("Term 3: ", term_3)
-            print("obj_val: ", obj_val)
-            print("norm_log_prob", norm_log_prob)
-            print("log_density_val", log_density_val)
-    else:
-        # Two parameter uncertainty (both theta and gamma)
-        ds_vect        = np.asarray(ds_vect).flatten()
-        uncertain_vals  = np.asarray(uncertain_vals).flatten()
-        size           = theta_vals.size
-        if scale == 1.0:
-            uncertain_vals[:size] = uncertain_vals[:size]*thetaSD
-            uncertain_vals[size:] = uncertain_vals[size:]*gammaSD
-        # print("uncertain_vals used in log density:", uncertain_vals)
-        x0_vals        = uncertain_vals[size:].T.dot(forestArea_2017_ha) / norm_fac
-        X_zero         = np.sum(x0_vals) * np.ones(leng)
+    term_1 = - np.sum(ds_vect[0: T] * sol_val_Ua) * zeta / 2
+    term_2 =   np.sum(ds_vect[0: T] * (X_dym[1: ] - X_dym[0: -1])) * pf
+    term_3 =   np.sum(ds_vect * np.sum(z_shifted_X, axis=0))
 
-        # shifted_X = zbar_2017 - sol.value(X)[0:size, :-1]
-        shifted_X  = sol_val_X[0: size, :-1].copy()
-        for j in range(N):
-            shifted_X[:, j]  = zbar_2017 - shifted_X[:, j]
-        omega      = np.dot(uncertain_vals[size:], alpha * shifted_X - sol_val_Up)
-
-        X_dym      = np.zeros(T+1)
-        X_dym[0]   = np.sum(x0_vals)
-        X_dym[1: ] = alpha_p_Adym * X_zero  + np.dot(Bdym, omega.T)
-
-        z_shifted_X = sol_val_X[0: size, :].copy()
-        scl = pa * uncertain_vals[:size] - pf * kappa
-        for j in range(N+1):
-            z_shifted_X [:, j] *= scl
-
-        term_1 = - np.sum(ds_vect[0: T] * sol_val_Ua) * zeta / 2
-        term_2 =   np.sum(ds_vect[0: T] * (X_dym[1: ] - X_dym[0: -1])) * pf
-        term_3 =   np.sum(ds_vect * np.sum(z_shifted_X, axis=0))
-
-        obj_val = term_1 + term_2 + term_3
-        if scale == 1.0:
-            uncertain_vals[:size] = uncertain_vals[:size]/thetaSD
-            uncertain_vals[size:] = uncertain_vals[size:]/gammaSD
-        uncertain_vals_dev   = uncertain_vals - uncertain_vals_mean
-        norm_log_prob   =   - 0.5 * np.dot(uncertain_vals_dev,
-                                           site_precisions.dot(uncertain_vals_dev)
-                                           )
-        log_density_val = -1.0  / xi * obj_val + norm_log_prob
-        log_density_val = float(log_density_val)
+    obj_val = term_1 + term_2 + term_3
+    # if scale == 1.0:
+    #     uncertain_vals[:size] = uncertain_vals[:size]/thetaSD
+    #     uncertain_vals[size:] = uncertain_vals[size:]/gammaSD
+    uncertain_vals_dev   = uncertain_vals - uncertain_vals_mean
+    norm_log_prob   =   - 0.5 * np.dot(uncertain_vals_dev,
+                                    np.linalg.inv(block_matrix).dot(uncertain_vals_dev)
+                                    )
+    log_density_val = -1.0  / xi * obj_val + norm_log_prob
+    log_density_val = float(log_density_val)
 
     return log_density_val
 
@@ -303,21 +320,33 @@ def solve_with_casadi(
     (
         zbar_2017,
         gamma,
-        gammaSD,
+        # gammaSD,
         z_2017,
         forestArea_2017_ha,
         theta,
-        thetaSD,
+        # thetaSD,
+        gamma_coe,
+        gamma_coe_sd,
+        theta_coe,
+        theta_coe_sd,
+        gamma_vcov_array,
+        theta_vcov_array,
+        data_theta,
+        data_gamma,
+        data_id
     ) = load_site_data(site_num, norm_fac=norm_fac, )
 
     # Print the data
     print("data loaded")
-    print("theta",theta, "thetaSD",thetaSD)
-    print("gamma",gamma, "gammaSD",gammaSD)
+
+
+    sfdata_theta=data_theta
+    sfdata_gamma=data_gamma
+    sfdata_id=data_id
+
+
 
     # Evaluate Gamma values ()
-    gamma_1_vals  = gamma -  gammaSD
-    gamma_2_vals  = gamma +  gammaSD
     gamma_vals    = gamma
     size    = gamma.size
 
@@ -328,46 +357,56 @@ def solve_with_casadi(
     # Retrieve z data for selected site(s)
     site_z_vals  = z_2017
 
-    if not two_param_uncertainty:
-        # One parameter (gamma) uncertainty
-        # Evaluate mean and covariances from site data
-        site_stdev       = gammaSD
-        site_covariances = np.diag(np.power(site_stdev, 2))
-        site_precisions  = np.linalg.inv(site_covariances)
-        site_mean        = gamma_1_vals/2 + gamma_2_vals/2
 
-        # Initialize Gamma Values
-        uncertain_vals      = gamma.copy()
-        uncertain_vals_mean = gamma.copy()
-        uncertain_vals_old  = gamma.copy()
+    # Coes value
+    gamma_coe_vals  = gamma_coe
+    theta_coe_vals  = theta_coe
 
-    else:
-        # Two parameter uncertainty (both theta and gamma)
-        vals = np.concatenate((theta_vals, gamma_vals))
-        # Evaluate mean and covariances from site data
-        site_stdev       = np.concatenate((thetaSD, gammaSD))
-        site_covariances = np.diag(np.power(site_stdev, 2))
-        site_precisions  = np.linalg.inv(site_covariances)
-        site_mean        = vals
+    # Construct the block matrix
+    rows1, cols1 = theta_vcov_array.shape
+    rows2, cols2 = gamma_vcov_array.shape
 
-        # Initialize Gamma Values
-        uncertain_vals      = vals.copy()
-        uncertain_vals_mean = vals.copy()
-        uncertain_vals_old  = vals.copy()
+    # Zero matrices for padding
+    zeros_top_right = np.zeros((rows1, cols2))
+    zeros_bottom_left = np.zeros((rows2, cols1))
+
+    # Construct the block matrix
+    block_matrix = np.block([[theta_vcov_array, zeros_top_right],
+                            [zeros_bottom_left, gamma_vcov_array]])
+
+
+    # Two parameter uncertainty (both theta and gamma)
+    vals = np.concatenate((theta_coe_vals, gamma_coe_vals))
+ 
+
+    # Initialize Gamma Values
+    uncertain_vals      = vals.copy()
+    uncertain_vals_mean = vals.copy()
+    uncertain_vals_old  = vals.copy()
 
     # Householder to track sampled gamma values
     # uncertain_vals_tracker       = np.empty((uncertain_vals.size, sample_size+1))
     # uncertain_vals_tracker[:, 0] = uncertain_vals.copy()
     uncertain_vals_tracker = [uncertain_vals.copy()]
-    uncertain_SD_tracker = [np.concatenate((thetaSD, gammaSD)).copy()]
+    uncertain_SD_tracker = [block_matrix.copy()]
 
-    if scale == 0.0:
-        mass_matrix_theta = 1/(thetaSD**2)
-        mass_matrix_gamma = 1/(gammaSD**2)
-    else:
-        mass_matrix_theta = np.ones(thetaSD.shape)
-        mass_matrix_gamma = np.ones(gammaSD.shape)
-    mass_matrix = np.concatenate((mass_matrix_theta, mass_matrix_gamma))
+
+
+
+    # mass_matrix = 100*np.concatenate((theta_coe_sd, gamma_coe_sd))
+    mass_matrix=block_matrix
+    # L = sqrtm(mass_matrix)
+
+
+    print("original",mass_matrix)
+    # sys.exit("Exiting because of some condition.")
+    # if scale == 0.0:
+        # mass_matrix_theta = 1/(thetaSD**2)
+        # mass_matrix_gamma = 1/(gammaSD**2)
+    # else:
+    #     mass_matrix_theta = np.ones(thetaSD.shape)
+    #     mass_matrix_gamma = np.ones(gammaSD.shape)
+    # mass_matrix = np.concatenate((mass_matrix_theta, mass_matrix_gamma))
     mass_matrix_tracker = [mass_matrix.copy()]
     print("mass_matrix initialization:",mass_matrix)
 
@@ -384,8 +423,8 @@ def solve_with_casadi(
     sol_val_Up_tracker = []
     sol_val_Um_tracker = []
     sol_val_Z_tracker = []
-    count_Ratio_tracker= []
-    site_count_Ratio_tracker=[]
+    # count_Ratio_tracker= []
+    # site_count_Ratio_tracker=[]
     # Update this parameter (leng) once figured out where it is coming from
     leng = 200
     arr  = np.cumsum(
@@ -435,12 +474,8 @@ def solve_with_casadi(
         final_sample_size=final_sample_size,
         mode_as_solution=mode_as_solution,
         mix_in=mix_in,
-        mass_matrix_theta_scale=mass_matrix_theta_scale,
-        mass_matrix_gamma_scale=mass_matrix_gamma_scale,
         symplectic_integrator_num_steps=symplectic_integrator_num_steps,
         two_param_uncertainty=two_param_uncertainty,
-        gammaSD = gammaSD,
-        thetaSD = thetaSD,
         weight=weight,
         mass_matrix_weight=mass_matrix_weight,
         output_dir=output_dir,
@@ -460,42 +495,42 @@ def solve_with_casadi(
         )
 
         print("uncertain_vals used in optimation: ", uncertain_vals)
-        if not two_param_uncertainty:
-        # One parameter (gamma) uncertainty
-            # Update x0
-            x0_vals = uncertain_vals * forestArea_2017_ha / norm_fac
-            # Construct Matrix A from new uncertain_vals
-            A[: -2, :]        = 0.0
-            Ax[0: size] = - alpha * uncertain_vals[0: size]
-            Ax[-1]            = alpha * np.sum(uncertain_vals * zbar_2017)
-            Ax[-2]            = - alpha
-            A[-2, :]          = Ax
-            A[-1, :]          = 0.0
-            A = casadi.sparsify(A)
+        # if not two_param_uncertainty:
+        # # One parameter (gamma) uncertainty
+        #     # Update x0
+        #     x0_vals = uncertain_vals * forestArea_2017_ha / norm_fac
+        #     # Construct Matrix A from new uncertain_vals
+        #     A[: -2, :]        = 0.0
+        #     Ax[0: size] = - alpha * uncertain_vals[0: size]
+        #     Ax[-1]            = alpha * np.sum(uncertain_vals * zbar_2017)
+        #     Ax[-2]            = - alpha
+        #     A[-2, :]          = Ax
+        #     A[-1, :]          = 0.0
+        #     A = casadi.sparsify(A)
 
-            # Construct Matrix D from new uncertain_vals
-            D[:, :]  = 0.0
-            D[-2, :] = -uncertain_vals
-            D = casadi.sparsify(D)
+        #     # Construct Matrix D from new uncertain_vals
+        #     D[:, :]  = 0.0
+        #     D[-2, :] = -uncertain_vals
+        #     D = casadi.sparsify(D)
 
-        else:
+        # else:
             # Two parameter uncertainty (both theta and gamma)
 
-            x0_vals = uncertain_vals[size:] * forestArea_2017_ha / norm_fac
+        x0_vals = gamma_vals * forestArea_2017_ha / norm_fac
 
-            # Construct Matrix A from new uncertain_vals
-            A[: -2, :]        = 0.0
-            Ax[0: size] = - alpha * uncertain_vals[size:]
-            Ax[-1]            = alpha * np.sum(uncertain_vals[size:] * zbar_2017)
-            Ax[-2]            = - alpha
-            A[-2, :]          = Ax
-            A[-1, :]          = 0.0
-            A = casadi.sparsify(A)
+        # Construct Matrix A from new uncertain_vals
+        A[: -2, :]        = 0.0
+        Ax[0: size] = - alpha * gamma_vals
+        Ax[-1]            = alpha * np.sum(gamma_vals * zbar_2017)
+        Ax[-2]            = - alpha
+        A[-2, :]          = Ax
+        A[-1, :]          = 0.0
+        A = casadi.sparsify(A)
 
-            # Construct Matrix D from new uncertain_vals
-            D[:, :]  = 0.0
-            D[-2, :] = -uncertain_vals[size:]
-            D = casadi.sparsify(D)
+        # Construct Matrix D from new uncertain_vals
+        D[:, :]  = 0.0
+        D[-2, :] = -gamma_vals
+        D = casadi.sparsify(D)
 
         # Define the right hand side (symbolic here) as a function of gamma
         gamma = casadi.MX.sym('gamma' , size+2)
@@ -539,20 +574,20 @@ def solve_with_casadi(
 
         opti.subject_to(Ua == casadi.sum1(Up+Um)**2)
 
-        if not two_param_uncertainty:
-            # One parameter (gamma) uncertainty
+        # if not two_param_uncertainty:
+        #     # One parameter (gamma) uncertainty
 
-            # Set teh optimization problem
-            term1 =   casadi.sum2(ds_vect[0: N, :].T * Ua * zeta / 2)
-            term2 = - casadi.sum2(ds_vect[0: N, :].T * (pf * (X[-2, 1: ] - X[-2, 0 :-1])))
-            term3 = - casadi.sum2(ds_vect.T * casadi.sum1( (pa * theta_vals - pf * kappa ) * X[0: size, :] ))
+        #     # Set teh optimization problem
+        #     term1 =   casadi.sum2(ds_vect[0: N, :].T * Ua * zeta / 2)
+        #     term2 = - casadi.sum2(ds_vect[0: N, :].T * (pf * (X[-2, 1: ] - X[-2, 0 :-1])))
+        #     term3 = - casadi.sum2(ds_vect.T * casadi.sum1( (pa * theta_vals - pf * kappa ) * X[0: size, :] ))
 
-        else:
+        # else:
             # Two parameter uncertainty (both theta and gamma)
 
-            term1 =   casadi.sum2(ds_vect[0: N, :].T * Ua * zeta / 2)
-            term2 = - casadi.sum2(ds_vect[0: N, :].T * (pf * (X[-2, 1: ] - X[-2, 0 :-1])))
-            term3 = - casadi.sum2(ds_vect.T * casadi.sum1( (pa * uncertain_vals[0:size] - pf * kappa ) * X[0: size, :] ))
+        term1 =   casadi.sum2(ds_vect[0: N, :].T * Ua * zeta / 2)
+        term2 = - casadi.sum2(ds_vect[0: N, :].T * (pf * (X[-2, 1: ] - X[-2, 0 :-1])))
+        term3 = - casadi.sum2(ds_vect.T * casadi.sum1( (pa * theta_vals - pf * kappa ) * X[0: size, :] ))
 
 
         opti.minimize(term1 + term2 + term3)
@@ -607,92 +642,61 @@ def solve_with_casadi(
         sol_val_Um_tracker.append(sol_val_Um)
         sol_val_Z_tracker.append(sol_val_Z)
 
-        if scale == 1.0:
-            print("Scaling the uncertainty values")
-            theta_vals = uncertain_vals[:size]
-            gamma_vals = uncertain_vals[size:]
-            theta_vals_adj = theta_vals/thetaSD
-            gamma_vals_adj = gamma_vals/gammaSD
-            uncertain_vals_adj = np.concatenate((theta_vals_adj, gamma_vals_adj))
-            site_stdev_adj       = np.concatenate((np.ones(thetaSD.shape), np.ones(gammaSD.shape)))
-            site_covariances_adj = np.diag(np.power(site_stdev_adj, 2))
-            site_precisions_adj  = np.linalg.inv(site_covariances_adj)
-            uncertain_vals_mean_adj = uncertain_vals_adj.copy()
 
-            print('Uncertain_vals used in the sampling: ', uncertain_vals_adj)
-            print("site_stdev_adj: ", site_stdev_adj)
+        # print("sol_val_X",sol_val_X)
+        # sys.exit("Exiting because of some condition.")
+        ## Start Sampling
+        # Update signature of log density evaluator
+        log_density = lambda uncertain_vals: log_density_function(uncertain_vals=uncertain_vals,
+                                                            uncertain_vals_mean=uncertain_vals_mean,
+                                                            block_matrix=block_matrix,
+                                                            # thetaSD=None,
+                                                            # gammaSD=None,
+                                                            scale=0.0,                                                                
+                                                            # site_precisions=site_precisions,
+                                                            alpha=alpha,
+                                                            N=N,
+                                                            # sol=sol,
+                                                            sol_val_X=sol_val_X,
+                                                            sol_val_Ua=sol_val_Ua,
+                                                            sol_val_Up=sol_val_Up,
+                                                            zbar_2017=zbar_2017,
+                                                            forestArea_2017_ha=forestArea_2017_ha,
+                                                            norm_fac=norm_fac,
+                                                            alpha_p_Adym=alpha_p_Adym,
+                                                            Bdym=Bdym,
+                                                            leng=leng,
+                                                            T=T,
+                                                            ds_vect=ds_vect,
+                                                            zeta=zeta,
+                                                            xi=xi,
+                                                            kappa=kappa,
+                                                            pa=pa,
+                                                            pf=pf,
+                                                            two_param_uncertainty =  two_param_uncertainty,
+                                                            sfdata_theta=sfdata_theta,
+                                                            sfdata_gamma=sfdata_gamma,
+                                                            sfdata_id=sfdata_id
+                                                            )
+        
 
-            log_density = lambda uncertain_vals_adj: log_density_function(uncertain_vals=uncertain_vals_adj,
-                                                             uncertain_vals_mean=uncertain_vals_mean_adj,
-                                                             theta_vals=theta_vals_adj,
-                                                             thetaSD=thetaSD,
-                                                             gammaSD=gammaSD,
-                                                             scale=1.0,
-                                                             site_precisions=site_precisions_adj,
-                                                             alpha=alpha,
-                                                             N=N,
-                                                             # sol=sol,
-                                                             sol_val_X=sol_val_X,
-                                                             sol_val_Ua=sol_val_Ua,
-                                                             sol_val_Up=sol_val_Up,
-                                                             zbar_2017=zbar_2017,
-                                                             forestArea_2017_ha=forestArea_2017_ha,
-                                                             norm_fac=norm_fac,
-                                                             alpha_p_Adym=alpha_p_Adym,
-                                                             Bdym=Bdym,
-                                                             leng=leng,
-                                                             T=T,
-                                                             ds_vect=ds_vect,
-                                                             zeta=zeta,
-                                                             xi=xi,
-                                                             kappa=kappa,
-                                                             pa=pa,
-                                                             pf=pf,
-                                                             two_param_uncertainty =  two_param_uncertainty
-                                                             )
-        else:
-            print("Not scaling the uncertainty values")
-            ## Start Sampling
-            # Update signature of log density evaluator
-            log_density = lambda uncertain_vals: log_density_function(uncertain_vals=uncertain_vals,
-                                                                uncertain_vals_mean=uncertain_vals_mean,
-                                                                theta_vals=theta_vals,
-                                                                thetaSD=None,
-                                                                gammaSD=None,
-                                                                scale=0.0,                                                                
-                                                                site_precisions=site_precisions,
-                                                                alpha=alpha,
-                                                                N=N,
-                                                                # sol=sol,
-                                                                sol_val_X=sol_val_X,
-                                                                sol_val_Ua=sol_val_Ua,
-                                                                sol_val_Up=sol_val_Up,
-                                                                zbar_2017=zbar_2017,
-                                                                forestArea_2017_ha=forestArea_2017_ha,
-                                                                norm_fac=norm_fac,
-                                                                alpha_p_Adym=alpha_p_Adym,
-                                                                Bdym=Bdym,
-                                                                leng=leng,
-                                                                T=T,
-                                                                ds_vect=ds_vect,
-                                                                zeta=zeta,
-                                                                xi=xi,
-                                                                kappa=kappa,
-                                                                pa=pa,
-                                                                pf=pf,
-                                                                two_param_uncertainty =  two_param_uncertainty
-                                                                )
-            
+        # test_vec = np.random.randn(13)
+        # log_density(test_vec)
+        # # log_density=log_density(uncertain_vals)
+        # print("log_density",log_density(test_vec))
+        # sys.exit("Exiting because of some condition.")
+
+
         # Create MCMC sampler & sample, then calculate diagnostics
-        if mode in [1.0, 3.0]:
-            constraint_test_mode = lambda x: True if np.all(x >= 0) else False
-        elif mode == 2.0:
-            constraint_test_mode = lambda x: True if np.max(x >= 0) else False
-        else:
-            raise ValueError("Invalid mode")
-
+        # if mode in [1.0, 3.0]:
+        #     constraint_test_mode = lambda x: True if np.all(x >= 0) else False
+        # elif mode == 2.0:
+        constraint_test_mode = lambda x: True if np.max(x >= 0) else False
+        # else:
+        #     raise ValueError("Invalid mode")
+        print("start HMC")
         sampler = create_hmc_sampler(
-            size=tot_size,
+            size=13,
             log_density=log_density,
             #
             burn_in=100,
@@ -701,35 +705,34 @@ def solve_with_casadi(
             symplectic_integrator_stepsize=stepsize,
             symplectic_integrator_num_steps=symplectic_integrator_num_steps,
             constraint_test=constraint_test_mode,
-            mass_matrix_gamma=mass_matrix_gamma,
-            mass_matrix_theta=mass_matrix_theta,
-            mass_matrix_gamma_scale=mass_matrix_gamma_scale,
-            mass_matrix_theta_scale=mass_matrix_theta_scale,
+            mass_matrix=mass_matrix
         )
 
-        if scale == 1.0:
-        # Update to get the mode as well as the sample
-            sampling_results = sampler.start_MCMC_sampling(
-                sample_size=sample_size,
-                initial_state=uncertain_vals_adj,
-                verbose=True,
-            )
-        else:
-            sampling_results = sampler.start_MCMC_sampling(
-                sample_size=sample_size,
-                initial_state=uncertain_vals,
-                verbose=True,
-            )
 
-        count_positive=sampling_results['count_positive']
-        count_Ratio=count_positive/2100
-        print("positive_ratio",count_Ratio)
-        count_Ratio_tracker.append(count_Ratio)
+        print("start sampling_results")
+        # if scale == 1.0:
+        # # Update to get the mode as well as the sample
+        #     sampling_results = sampler.start_MCMC_sampling(
+        #         sample_size=sample_size,
+        #         initial_state=uncertain_vals_adj,
+        #         verbose=True,
+        #     )
+        # else:
+        sampling_results = sampler.start_MCMC_sampling(
+            sample_size=sample_size,
+            initial_state=uncertain_vals,
+            verbose=True,
+        )
 
-        site_count_positive=sampling_results['site_count_positive']
-        site_count_Ratio=site_count_positive/2100
-        print("site positive ratio",site_count_Ratio)
-        site_count_Ratio_tracker.append(site_count_Ratio)
+        # count_positive=sampling_results['count_positive']
+        # count_Ratio=count_positive/2100
+        # print("positive_ratio",count_Ratio)
+        # count_Ratio_tracker.append(count_Ratio)
+
+        # site_count_positive=sampling_results['site_count_positive']
+        # site_count_Ratio=site_count_positive/2100
+        # print("site positive ratio",site_count_Ratio)
+        # site_count_Ratio_tracker.append(site_count_Ratio)
 
         uncertainty_post_samples = np.asarray(
             sampling_results['collected_ensemble']
@@ -753,61 +756,79 @@ def solve_with_casadi(
         else:
             print("uncertain values from last iteration: ", uncertain_vals_old)
             print("uncertain values from this iteration: ", np.mean(uncertainty_post_samples, axis=0))
-            if scale == 1.0:
-                uncertainty_post_samples[:, :size] *= thetaSD
-                uncertainty_post_samples[:, size:] *= gammaSD
-                print("scale back uncertain values from this iteration: ", np.mean(uncertainty_post_samples, axis=0))
+            # if scale == 1.0:
+            #     uncertainty_post_samples[:, :size] *= thetaSD
+            #     uncertainty_post_samples[:, size:] *= gammaSD
+            #     print("scale back uncertain values from this iteration: ", np.mean(uncertainty_post_samples, axis=0))
 
-            if mode == 2.0: # drop negative values
+            # if mode == 2.0: # drop negative values
                 
-                means = np.mean(uncertainty_post_samples, axis=0)
-                stds = np.std(uncertainty_post_samples, axis=0)
-                print(uncertainty_post_samples.shape)
-                lower_bound = np.zeros(means.shape)
-                upper_bound = np.inf * np.ones(means.shape)
-                a, b = (lower_bound - means) / stds, (upper_bound - means) / stds
-                trunc_normal_means = []
-                trunc_normal_stds = []
-                for i in range(uncertainty_post_samples.shape[1]):
-                    distribution = truncnorm(a[i], b[i], loc=means[i], scale=stds[i])
-                    trunc_mean = distribution.mean()
-                    trunc_normal_means.append(trunc_mean)
-                    trunc_std = distribution.std()
-                    trunc_normal_stds.append(trunc_std)
+            #     means = np.mean(uncertainty_post_samples, axis=0)
+            #     stds = np.std(uncertainty_post_samples, axis=0)
+            #     print(uncertainty_post_samples.shape)
+            #     lower_bound = np.zeros(means.shape)
+            #     upper_bound = np.inf * np.ones(means.shape)
+            #     a, b = (lower_bound - means) / stds, (upper_bound - means) / stds
+            #     trunc_normal_means = []
+            #     trunc_normal_stds = []
+            #     for i in range(uncertainty_post_samples.shape[1]):
+            #         distribution = truncnorm(a[i], b[i], loc=means[i], scale=stds[i])
+            #         trunc_mean = distribution.mean()
+            #         trunc_normal_means.append(trunc_mean)
+            #         trunc_std = distribution.std()
+            #         trunc_normal_stds.append(trunc_std)
 
-                trunc_normal_means = np.array(trunc_normal_means)
-                uncertain_vals = weight * trunc_normal_means + (1-weight) * uncertain_vals_old
-                trunc_normal_stds = np.array(trunc_normal_stds)
+            #     trunc_normal_means = np.array(trunc_normal_means)
+            #     uncertain_vals = weight * trunc_normal_means + (1-weight) * uncertain_vals_old
+            #     trunc_normal_stds = np.array(trunc_normal_stds)
 
-                print("trunc_normal_means",trunc_normal_means)
-                print("trunc_normal_stds",trunc_normal_stds)
+            #     print("trunc_normal_means",trunc_normal_means)
+            #     print("trunc_normal_stds",trunc_normal_stds)
 
-                # mask = uncertainty_post_samples < 0
-                # masked_samples = ma.masked_array(uncertainty_post_samples, mask)
-                # mean_non_negative = np.mean(masked_samples, axis=0).data
-                # print("mean_non_negative",mean_non_negative)
-                # print("mean_with_negative",np.mean(uncertainty_post_samples, axis=0 ))
-                # uncertain_vals = weight * np.mean(masked_samples, axis=0).data + (1-weight) * uncertain_vals_old
-            else:
-                uncertain_vals = weight * np.mean(uncertainty_post_samples, axis=0 ) + (1-weight) * uncertain_vals_old
+            #     # mask = uncertainty_post_samples < 0
+            #     # masked_samples = ma.masked_array(uncertainty_post_samples, mask)
+            #     # mean_non_negative = np.mean(masked_samples, axis=0).data
+            #     # print("mean_non_negative",mean_non_negative)
+            #     # print("mean_with_negative",np.mean(uncertainty_post_samples, axis=0 ))
+            # #     # uncertain_vals = weight * np.mean(masked_samples, axis=0).data + (1-weight) * uncertain_vals_old
+            # else:
+            uncertain_vals = weight * np.mean(uncertainty_post_samples, axis=0 ) + (1-weight) * uncertain_vals_old
             
             print("updated uncertain values: ", uncertain_vals)
 
         uncertain_vals_tracker.append(uncertain_vals.copy())
 
-        if mode == 2.0:
-            uncertain_post_SD = trunc_normal_stds.copy()
-        else:
-            uncertain_post_SD = np.std(uncertainty_post_samples, axis=0)
-        thetaSD = uncertain_post_SD[:size]
-        gammaSD = uncertain_post_SD[size:]
+        # if mode == 2.0:
+        #     uncertain_post_SD = trunc_normal_stds.copy()
+        # else:
+  
+
+        ## to do
+        theta_coe_subset=uncertainty_post_samples[:,:8]
+        gamma_coe_subset=uncertainty_post_samples[:,8:]
+        theta_vcov_array = np.cov(theta_coe_subset, rowvar=False)
+        gamma_vcov_array = np.cov(gamma_vcov_array, rowvar=False)
+
+        # Construct the block matrix
+        rows1, cols1 = theta_vcov_array.shape
+        rows2, cols2 = gamma_vcov_array.shape
+
+        # Zero matrices for padding
+        zeros_top_right = np.zeros((rows1, cols2))
+        zeros_bottom_left = np.zeros((rows2, cols1))
+
+        # Construct the block matrix
+        block_matrix = np.block([[theta_vcov_array, zeros_top_right],
+                                [zeros_bottom_left, gamma_vcov_array]])
+
+        uncertain_post_SD=block_matrix
         print("uncertain value standard deviation from this iteration: ", uncertain_post_SD)
         uncertain_SD_tracker.append(uncertain_post_SD.copy())
 
-        mass_matrix = mass_matrix_weight * 1/(uncertain_post_SD**2) + (1-mass_matrix_weight) * np.concatenate((mass_matrix_theta, mass_matrix_gamma))
+        mass_matrix = np.linalg.inv(block_matrix)
+
         print("updated mass matrix:", mass_matrix)
-        mass_matrix_theta = mass_matrix[0:size]
-        mass_matrix_gamma = mass_matrix[size:]
+
         mass_matrix_tracker.append(mass_matrix.copy())
 
         # Evaluate error for convergence check
@@ -842,8 +863,6 @@ def solve_with_casadi(
                         'sol_val_Up_tracker': sol_val_Up_tracker,
                         'sol_val_Um_tracker': sol_val_Um_tracker,
                         'sol_val_Z_tracker': sol_val_Z_tracker,
-                        'count_Ratio_tracker':count_Ratio_tracker,
-                        'site_count_Ratio_tracker':site_count_Ratio_tracker,
                         })
 
         # Save results (overwrite existing file)
@@ -1259,10 +1278,7 @@ def solve_with_gams(
             symplectic_integrator_stepsize=stepsize,
             symplectic_integrator_num_steps=symplectic_integrator_num_steps,
             constraint_test=lambda x: True if np.all(x>=0) else False,
-            mass_matrix_gamma=mass_matrix_gamma,
-            mass_matrix_theta=mass_matrix_theta,
-            mass_matrix_gamma_scale=mass_matrix_gamma_scale,
-            mass_matrix_theta_scale=mass_matrix_theta_scale,
+            mass_matrix=mass_matrix
         )
 
 
