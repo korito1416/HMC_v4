@@ -127,45 +127,35 @@ def get_gams_system_directory(filepath=_GAMS_SYSTEM_LOADER, ):
 
 
 def theta_fitted (theta_coe,
-                 id_dataframe,
-                 theta_dataframe
+                theta_dataframe
 ):
-
-    theta_dataframe['fitted_value'] = np.exp((theta_dataframe.iloc[:, :8] * theta_coe).sum(axis=1))
-    theta_dataframe_fin=theta_dataframe[['zbar_2017_muni','geometry','fitted_value']]
-    site_theta_2017 = gpd.overlay(id_dataframe, theta_dataframe_fin, how='intersection')
-
-
+       
+    theta_data=theta_dataframe
+    theta_data['fitted_value'] = np.exp((theta_data.iloc[:, 1:9] * theta_coe).sum(axis=1))
+    theta_data=theta_data[['id','zbar_2017_muni','fitted_value']]
     aux_price_2017=44.9736197781184
-    site_theta_2017 = site_theta_2017[site_theta_2017['zbar_2017_muni'].notna()]
-
-    # Define a function for computing weighted mean for each group
+    theta_data = theta_data[theta_data['zbar_2017_muni'].notna()]
     def weighted_mean(group):
         d = group['fitted_value'] / aux_price_2017  # assuming aux.price.2017 is a constant
         w = group['zbar_2017_muni']
         return np.average(d, weights=w)
 
-    # 2. Group by 'id' and 3. compute the weighted mean for each group
-    result = site_theta_2017.groupby('id').apply(weighted_mean).reset_index(name='theta2017_25Sites')
-    theta=result['theta2017_25Sites'].to_numpy()
+    result = theta_data.groupby('id').apply(weighted_mean).reset_index(name='theta2017_Sites')
+    theta=result['theta2017_Sites'].to_numpy()
     return theta
 
 
-
 def gamma_fitted (gamma_coe,
-                 id_dataframe,
                  gamma_dataframe
 ):
-
-    gamma_dataframe['fitted_value'] = np.exp((gamma_dataframe.iloc[:, :5] * gamma_coe).sum(axis=1))
-    gamma_dataframe_fin=gamma_dataframe[['geometry','fitted_value']]
-    site_gamma_2017 = gpd.overlay(id_dataframe, gamma_dataframe_fin, how='intersection')
-
+    gamma_data=gamma_dataframe
+    gamma_data['fitted_value'] = np.exp((gamma_data.iloc[:, 1:6] * gamma_coe).sum(axis=1))
+    gamma_data=gamma_data[['id','fitted_value']]
 
 
     # 2. Group by 'id' and 3. compute the weighted mean for each group
-    result = site_gamma_2017.groupby('id')['fitted_value'].mean().reset_index(name='gamma2017_25Sites')
-    gamma=result['gamma2017_25Sites'].to_numpy()
+    result = gamma_data.groupby('id')['fitted_value'].mean().reset_index(name='gamma2017_Sites')
+    gamma=result['gamma2017_Sites'].to_numpy()
     return gamma
 
 def log_density_function(uncertain_vals,
@@ -190,9 +180,8 @@ def log_density_function(uncertain_vals,
                          kappa,
                          pa,
                          pf,
-                         sfdata_theta,
-                         sfdata_gamma,
-                         sfdata_id,
+                         site_theta_2017_df,
+                         site_gamma_2017_df,
                          two_param_uncertainty=True,
                         #  thetaSD=None,
                         #  gammaSD=None,
@@ -215,11 +204,9 @@ def log_density_function(uncertain_vals,
     gamma_coe_vals=uncertain_vals[8:]
 
     theta_fit=theta_fitted(theta_coe=theta_coe_vals,
-                id_dataframe=sfdata_id,
-                theta_dataframe=sfdata_theta)
+                theta_dataframe=site_theta_2017_df)
     gamma_fit=gamma_fitted(gamma_coe=gamma_coe_vals,
-            id_dataframe=sfdata_id,
-            gamma_dataframe=sfdata_gamma)
+                gamma_dataframe=site_gamma_2017_df)
 
     size           = theta_fit.size
     beta_vals = np.concatenate((theta_fit, gamma_fit))
@@ -267,7 +254,7 @@ def log_density_function(uncertain_vals,
 def solve_with_casadi(
     # Configurations/Settings
     site_num          = 25,  # Number of sites(10, 25, 100, 1000)
-    norm_fac          = 1e9,
+    norm_fac          = 1e11,
     delta_t           = 0.02,
     alpha             = 0.045007414,
     kappa             = 2.094215255,
@@ -331,18 +318,16 @@ def solve_with_casadi(
         theta_coe_sd,
         gamma_vcov_array,
         theta_vcov_array,
-        data_theta,
-        data_gamma,
-        data_id
+        site_theta_2017_df,
+        site_gamma_2017_df
     ) = load_site_data(site_num, norm_fac=norm_fac, )
 
     # Print the data
     print("data loaded")
 
+    site_theta_2017_df=site_theta_2017_df
+    site_gamma_2017_df=site_gamma_2017_df
 
-    sfdata_theta=data_theta
-    sfdata_gamma=data_gamma
-    sfdata_id=data_id
 
 
 
@@ -394,7 +379,9 @@ def solve_with_casadi(
 
 
     # mass_matrix = 100*np.concatenate((theta_coe_sd, gamma_coe_sd))
-    mass_matrix=block_matrix
+    # mass_matrix=100*np.block([[theta_vcov_array, zeros_top_right],
+    #                         [zeros_bottom_left, 10000*gamma_vcov_array]])
+    mass_matrix=np.linalg.inv(block_matrix)
     # L = sqrtm(mass_matrix)
 
 
@@ -674,16 +661,38 @@ def solve_with_casadi(
                                                             pa=pa,
                                                             pf=pf,
                                                             two_param_uncertainty =  two_param_uncertainty,
-                                                            sfdata_theta=sfdata_theta,
-                                                            sfdata_gamma=sfdata_gamma,
-                                                            sfdata_id=sfdata_id
+                                                            site_theta_2017_df=site_theta_2017_df,
+                                                            site_gamma_2017_df=site_gamma_2017_df
                                                             )
         
 
         # test_vec = np.random.randn(13)
         # log_density(test_vec)
-        # # log_density=log_density(uncertain_vals)
-        # print("log_density",log_density(test_vec))
+        # # # log_density=log_density(uncertain_vals)
+        # print("log_density",log_density(uncertain_vals))
+
+        # test_np=np.array([-1.15559607e+02 ,-6.41873731e-01,  1.16079385e+02 ,-6.09304912e+01,
+        # 1.28848350e+02, -6.59771297e+01 , 2.72129643e+00 , 1.22676741e-01,
+        # -8.70907810e+00 , 4.36212152e-01 ,-4.55517312e+00 , 3.20114284e+00,
+        # -1.63461641e+00+1e-5])
+        # print("log_density_proposed",log_density(test_np))
+        # test_np2=np.array([-1.15559607e+02 ,-6.41873731e-01,  1.16079385e+02 ,-6.09304912e+01,
+        # 1.28848350e+02, -6.59771297e+01 , 2.72129643e+00 , 1.22676741e-01,
+        # -8.70907810e+00 , 4.36212152e-01 ,-4.55517312e+00 , 3.20114284e+00,
+        # -1.63461641e+00])
+        # print("log_density_proposed_2",log_density(test_np2))
+
+        # test_np=np.array([-8.70907810e+00 , 4.36212152e-01 ,-4.55517312e+00 , 3.20114284e+00,
+        # -1.63461641e+00+1e-5])        
+        # test_np2=np.array([-8.70907810e+00 , 4.36212152e-01 ,-4.55517312e+00 , 3.20114284e+00,
+        # -1.63461641e+00])        
+        # print("log_density_proposed",gamma_fitted(gamma_coe=test_np,
+        #     id_dataframe=sfdata_id,
+        #     gamma_dataframe=sfdata_gamma)  )
+        # print("log_density_proposed2",gamma_fitted(gamma_coe=test_np2,
+        #     id_dataframe=sfdata_id,
+        #     gamma_dataframe=sfdata_gamma)  ) 
+
         # sys.exit("Exiting because of some condition.")
 
 
@@ -901,7 +910,7 @@ def solve_with_casadi(
 def solve_with_gams(
     # Configurations/Settings
     site_num          = 25,  # Number of sites(10, 25, 100, 1000)
-    norm_fac          = 1e9,
+    norm_fac          = 1e12,
     delta_t           = 0.02,
     alpha             = 0.045007414,
     kappa             = 2.094215255,

@@ -379,6 +379,8 @@ class HMCSampler(Sampler):
         if sparse is not None:
             self._MASS_MATRIX     = csc_matrix(mass_matrix)
             self._MASS_MATRIX_INV = sparse.linalg.inv(self._MASS_MATRIX)
+            print("it goes here")
+            print("self._MASS_MATRIX_INV",self._MASS_MATRIX_INV)
             
         else:
             self._MASS_MATRIX = np.asarray(mass_matrix)
@@ -449,7 +451,7 @@ class HMCSampler(Sampler):
                     if fd_central:
                         grad[i] = (func(x+e) - func(x-e)) / (2.0 * fd_eps)
                     else:
-                        grad[i] = (func(x+e) - func(x)) / fd_eps
+                        grad[i] = (func(x+e) - func(x)) / fd_eps ## need to reconsider here
                 return grad
             return func_grad
 
@@ -543,20 +545,20 @@ class HMCSampler(Sampler):
                     self._CONFIGURATIONS['parallel_fd_grad'] = False
 
                     log_density_grad = log_density_grad_serial
-
+                    print("code line 548")
                 elif not parallel_failed:
                     log_density_grad = log_density_grad_parallel
-
+                    print("code line 551")
                 elif not threaded_failed:
                     log_density_grad = log_density_grad_threaded
-
+                    print("code line 554")
                 else:
                     print("This is not possible to show; report this bug!")
                     raise ValueError
 
             else:
                 log_density_grad = log_density_grad_serial
-
+                print("code line 561")
 
         elif not callable(log_density_grad):
             print(f"The 'log_density_grad' found in the configurations is not a valid callable/function!")
@@ -941,14 +943,19 @@ class HMCSampler(Sampler):
             #
             if re.match(r"\A(verlet|leapfrog)\Z", symplectic_integrator, re.IGNORECASE):
 
+                # print("inverse mass matrix",self._MASS_MATRIX_INV)
+                # print("current state",current_state)
+                # print("current momentum",current_momentum)
+                # print("to update state",self.mass_matrix_inv_matvec(current_momentum))
                 # Update state
                 proposed_state = current_state + (0.5*h) * self.mass_matrix_inv_matvec(current_momentum)
-                print("1: proposed state", proposed_state)
+                # print("1: proposed state", proposed_state)
 
                 # Update momentum
                 grad = self.potential_energy_grad(proposed_state)
+                # print("gradient",grad)
                 proposed_momentum = current_momentum - h * grad
-                print("<: proposed momentum", proposed_momentum)
+                # print("<: proposed momentum", proposed_momentum)
 
                 # Update state again
                 proposed_state += (0.5*h) * self.mass_matrix_inv_matvec(proposed_momentum)
@@ -1118,8 +1125,8 @@ class HMCSampler(Sampler):
 
                 energy_loss = proposal_energy - current_energy
                 
-                # print("proposed_momentum",proposed_momentum,"current_momentum",current_momentum)
-                # print("proposed_state",proposed_state,"current_state",current_state)
+                print("proposed_momentum",proposed_momentum,"current_momentum",current_momentum)
+                print("proposed_state",proposed_state,"current_state",current_state)
                 # print("current_momentum",np.max(proposed_momentum),"current_momentum",np.max(current_momentum))
                 print("energy_loss",energy_loss,"proposal_energy",proposal_energy,"current_energy",current_energy,
                          "proposal_kinetic_energy",proposal_kinetic_energy,"proposal_potential_energy",proposal_potential_energy)

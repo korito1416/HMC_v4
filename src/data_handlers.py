@@ -100,6 +100,11 @@ def load_site_data(site_num,
     )
     data_id = gpd.read_file(file_id)
 
+    site_theta_2017 = gpd.overlay(data_id, data_theta, how='intersection')
+    site_theta_2017_df=site_theta_2017.iloc[:, :-1]
+    site_gamma_2017 = gpd.overlay(data_id, data_gamma, how='intersection')
+    site_gamma_2017_df=site_gamma_2017.iloc[:,:-1]
+
 
     print(f"Data successfully loaded from '{file}'")
     return (zbar_2017,
@@ -115,8 +120,7 @@ def load_site_data(site_num,
             theta_coe_sd,
             gamma_vcov_array,
             theta_vcov_array,
-            data_theta,
-            data_gamma,
-            data_id
+            site_theta_2017_df,
+            site_gamma_2017_df
             )
 
